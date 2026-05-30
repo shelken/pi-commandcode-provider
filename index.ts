@@ -97,14 +97,32 @@ export default async function (pi: ExtensionAPI) {
       refreshToken,
       getApiKey,
     },
-    models: models.map((model) => ({
-      id: model.id,
-      name: model.name,
-      reasoning: model.reasoning,
-      input: ["text"] as const,
-      cost: MODEL_COSTS[model.id] ?? ZERO_MODEL_COST,
-      contextWindow: model.contextWindow,
-      maxTokens: model.maxTokens,
-    })),
+    models: models.map((model) => {
+      const baseModel = {
+        id: model.id,
+        name: model.name,
+        reasoning: model.reasoning,
+        input: ["text"] as const,
+        cost: MODEL_COSTS[model.id] ?? ZERO_MODEL_COST,
+        contextWindow: model.contextWindow,
+        maxTokens: model.maxTokens,
+      }
+
+      // 只给 DeepSeek 模型添加 thinkingLevelMap
+      if (model.id.startsWith("deepseek/")) {
+        return {
+          ...baseModel,
+          thinkingLevelMap: {
+            minimal: null,
+            low: null,
+            medium: null,
+            high: "high",
+            xhigh: "max",
+          },
+        }
+      }
+
+      return baseModel
+    }),
   })
 }
