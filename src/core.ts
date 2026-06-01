@@ -132,10 +132,14 @@ export function createStreamCommandCode(deps: CoreDependencies) {
     const stream = deps.createStream()
 
     async function run() {
-      // OMP may pass the env-var name "COMMANDCODE_API_KEY" as the apiKey
-      // value instead of resolving it. Filter out this specific string.
+      // OMP/older pi may pass the env-var name as the apiKey value (with or
+      // without the leading "$") instead of resolving it. Filter both forms.
       const hostKey =
-        options?.apiKey && options.apiKey !== "COMMANDCODE_API_KEY" ? options.apiKey : undefined
+        options?.apiKey &&
+        options.apiKey !== "COMMANDCODE_API_KEY" &&
+        options.apiKey !== "$COMMANDCODE_API_KEY"
+          ? options.apiKey
+          : undefined
 
       const apiKey =
         hostKey ??

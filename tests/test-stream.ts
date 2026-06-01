@@ -65,7 +65,7 @@ describe("streamCommandCode — auth", () => {
     })
 
     await collectEvents(
-      streamCommandCode(makeModel(), makeContext(), { apiKey: "COMMANDCODE_API_KEY" }),
+      streamCommandCode(makeModel(), makeContext(), { apiKey: "$COMMANDCODE_API_KEY" }),
     )
 
     assert.equal(
