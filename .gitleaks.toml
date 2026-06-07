@@ -6,14 +6,8 @@ title = "pi-commandcode-provider secret scan"
 [allowlist]
   description = "Known safe paths and test fixtures"
   paths = [
-    # Test helpers with mock credentials
-    "tests/test-oauth.ts",
-    "tests/test-stream.ts",
-    "tests/test-pure-functions.ts",
-    "tests/test-pi-local.mjs",
-    "tests/test-omp-compat.mjs",
-    # CI workflows reference NPM_TOKEN secret name
-    ".github/workflows/publish.yml",
+    # Test fixtures use intentionally fake credentials.
+    "^tests/",
   ]
 
 # ──────────────────────────────────────────────────────────

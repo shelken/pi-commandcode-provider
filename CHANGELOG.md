@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+## 0.4.0 - 2026-06-02
+
+- Add retry mechanism for transient HTTP errors (429, 5xx) and stream-level errors, configurable via pi `settings.json` `retry.provider` fields (`timeoutMs`, `maxRetries`, `maxRetryDelayMs`). Supports exponential backoff with jitter and `Retry-After` header.
+
 ## 0.3.1 - 2026-05-29
 
 - Bump CLI version header to `0.29.0` for Command Code API parity.

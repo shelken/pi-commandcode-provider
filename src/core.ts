@@ -42,6 +42,43 @@ export const DEFAULT_API_BASE = "https://api.commandcode.ai"
 export const COMMAND_CODE_CLI_VERSION = "0.29.0"
 
 const DEFAULT_GENERATE_MAX_TOKENS = 64_000
+const DEFAULT_MAX_RETRIES = 0
+const DEFAULT_MAX_RETRY_DELAY_MS = 60_000
+const BASE_RETRY_DELAY_MS = 500
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || (status >= 500 && status < 600)
+}
+
+function parseRetryAfterSeconds(value: string | null): number | undefined {
+  if (!value) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds
+  const date = Date.parse(value)
+  if (!Number.isNaN(date)) return Math.max(0, (date - Date.now()) / 1000)
+  return undefined
+}
+
+function effectiveMaxRetryDelayMs(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_MAX_RETRY_DELAY_MS
+  if (value === 0) return Number.POSITIVE_INFINITY
+  return value
+}
+
+function retryDelayMs(
+  attempt: number,
+  retryAfterHeader: string | null,
+  maxDelayMs: number,
+): number {
+  const retryAfterMs = parseRetryAfterSeconds(retryAfterHeader)
+  if (retryAfterMs !== undefined) {
+    if (retryAfterMs * 1000 > maxDelayMs) return -1
+    return retryAfterMs * 1000
+  }
+  const exponential = BASE_RETRY_DELAY_MS * 2 ** attempt
+  const jitter = exponential * 0.2 * Math.random()
+  return Math.min(exponential + jitter, maxDelayMs)
+}
 
 function defaultUsage(): Usage {
   return {
@@ -76,6 +113,14 @@ function abortError(message = "The operation was aborted"): DOMException {
   return new DOMException(message, "AbortError")
 }
 
+function timeoutError(timeoutMs: number | undefined): Error {
+  return new Error(
+    timeoutMs === undefined
+      ? "Command Code API request timed out"
+      : `Command Code API request timed out after ${timeoutMs}ms`,
+  )
+}
+
 function successStopReason(reason: TerminalReason): StopReason {
   if (reason === "length" || reason === "toolUse") return reason
   return "stop"
@@ -104,6 +149,22 @@ export function createStreamCommandCode(deps: CoreDependencies) {
   const cwd = deps.cwd ?? (() => process.cwd())
   const now = deps.now ?? (() => Date.now())
   const uuid = deps.uuid ?? (() => randomUUID())
+  const delay =
+    deps.delay ??
+    ((ms: number, signal: AbortSignal) => {
+      if (signal.aborted) return Promise.reject(abortError())
+      return new Promise<void>((resolve, reject) => {
+        const id = setTimeout(() => {
+          signal.removeEventListener("abort", onAbort)
+          resolve()
+        }, ms)
+        const onAbort = () => {
+          clearTimeout(id)
+          reject(abortError())
+        }
+        signal.addEventListener("abort", onAbort, { once: true })
+      })
+    })
 
   function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
     if (signal.aborted) return Promise.reject(abortError())
@@ -390,81 +451,170 @@ export function createStreamCommandCode(deps: CoreDependencies) {
         )
         if (nextBody !== undefined) body = nextBody
 
-        const response = await raceAbort(
-          fetchImpl(`${apiBase}/alpha/generate`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${apiKey}`,
-              "x-command-code-version": COMMAND_CODE_CLI_VERSION,
-              "x-cli-environment": "production",
-              "x-project-slug": projectSlugFromPath(workingDir),
-              "x-taste-learning": "true",
-              "x-co-flag": "false",
-              ...options?.headers,
-            },
-            body: JSON.stringify(body),
-            signal: controller.signal,
-          }),
-          controller.signal,
-        )
-
-        await raceAbort(
-          Promise.resolve(
-            options?.onResponse?.(
-              {
-                status: response.status,
-                headers: headersToRecord(response.headers),
-              },
-              model,
-            ),
-          ),
-          controller.signal,
-        )
-
-        if (!response.ok) {
-          const errBody = await raceAbort(
-            response.text().catch(() => ""),
-            controller.signal,
-          )
-          throw new Error(`Command Code API error ${response.status}: ${errBody.slice(0, 500)}`)
+        const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES
+        const maxRetryDelayMs = effectiveMaxRetryDelayMs(options?.maxRetryDelayMs)
+        const timeoutMs = options?.timeoutMs
+        const requestHeaders = {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          "x-command-code-version": COMMAND_CODE_CLI_VERSION,
+          "x-cli-environment": "production",
+          "x-project-slug": projectSlugFromPath(workingDir),
+          "x-taste-learning": "true",
+          "x-co-flag": "false",
+          ...options?.headers,
         }
+        const bodyStr = JSON.stringify(body)
 
-        reader = response.body?.getReader()
-        if (!reader) throw new Error("No response body")
+        let response!: Response
+        retryLoop: for (let attempt = 0; ; attempt++) {
+          const attemptController = new AbortController()
+          let attemptTimedOut = false
+          let attemptTimeoutId: ReturnType<typeof setTimeout> | undefined
 
-        const decoder = new TextDecoder()
-        let buffer = ""
-
-        readLoop: for (;;) {
-          if (controller.signal.aborted) throw abortError("Aborted")
-          const { done, value } = await raceAbort(reader.read(), controller.signal)
-          if (done) {
-            if (buffer.trim()) handleEvent(parseStreamEventLine(buffer))
-            break
+          const clearAttemptTimeout = () => {
+            if (attemptTimeoutId !== undefined) {
+              clearTimeout(attemptTimeoutId)
+              attemptTimeoutId = undefined
+            }
           }
-          if (controller.signal.aborted) throw abortError("Aborted")
 
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split("\n")
-          buffer = lines.pop() ?? ""
+          if (timeoutMs !== undefined) {
+            attemptTimeoutId = setTimeout(() => {
+              attemptTimedOut = true
+              attemptController.abort()
+            }, timeoutMs)
+          }
+          const onOuterAbort = () => attemptController.abort()
+          controller.signal.addEventListener("abort", onOuterAbort, { once: true })
 
-          for (const line of lines) {
-            if (controller.signal.aborted) throw abortError("Aborted")
-            handleEvent(parseStreamEventLine(line))
-            if (finished) break readLoop
+          try {
+            try {
+              response = await fetchImpl(`${apiBase}/alpha/generate`, {
+                method: "POST",
+                headers: requestHeaders,
+                body: bodyStr,
+                signal: attemptController.signal,
+              })
+            } catch (fetchError: unknown) {
+              if (controller.signal.aborted) throw abortError("Aborted")
+              if (attemptTimedOut) {
+                if (attempt < maxRetries) continue retryLoop
+                throw timeoutError(timeoutMs)
+              }
+              throw fetchError
+            }
+
+            // --- HTTP-level retry ---
+            if (!response.ok && isRetryableStatus(response.status)) {
+              const retryAfter = response.headers.get("retry-after")
+              const waitMs = retryDelayMs(attempt, retryAfter, maxRetryDelayMs)
+              if (waitMs < 0) {
+                const requestedSeconds = parseRetryAfterSeconds(retryAfter) ?? 0
+                const capLabel =
+                  maxRetryDelayMs === Number.POSITIVE_INFINITY ? "disabled" : `${maxRetryDelayMs}ms`
+                throw new Error(`Retry-After delay ${requestedSeconds}s exceeds max ${capLabel}`)
+              }
+              if (attempt < maxRetries) {
+                await response.text().catch(() => "")
+                if (waitMs > 0) await delay(waitMs, controller.signal)
+                continue retryLoop
+              }
+            }
+
+            await raceAbort(
+              Promise.resolve(
+                options?.onResponse?.(
+                  {
+                    status: response.status,
+                    headers: headersToRecord(response.headers),
+                  },
+                  model,
+                ),
+              ),
+              controller.signal,
+            )
+
+            if (!response.ok) {
+              const errBody = await raceAbort(
+                response.text().catch(() => ""),
+                controller.signal,
+              )
+              throw new Error(`Command Code API error ${response.status}: ${errBody.slice(0, 500)}`)
+            }
+
+            // --- Read response stream ---
+            reader = response.body?.getReader()
+            if (!reader) throw new Error("No response body")
+
+            const decoder = new TextDecoder()
+            let buffer = ""
+
+            try {
+              readLoop: for (;;) {
+                if (controller.signal.aborted) throw abortError("Aborted")
+                const { done, value } = await raceAbort(reader.read(), attemptController.signal)
+                if (done) {
+                  if (buffer.trim()) handleEvent(parseStreamEventLine(buffer))
+                  break
+                }
+                if (controller.signal.aborted) throw abortError("Aborted")
+
+                buffer += decoder.decode(value, { stream: true })
+                const lines = buffer.split("\n")
+                buffer = lines.pop() ?? ""
+
+                for (const line of lines) {
+                  if (controller.signal.aborted) throw abortError("Aborted")
+                  handleEvent(parseStreamEventLine(line))
+                  if (finished) break readLoop
+                }
+              }
+            } catch (streamError: unknown) {
+              // Stream-level error (e.g. API returned 200 OK but sent an error event)
+              // or per-attempt timeout during stream reading.
+              await reader.cancel().catch(() => {})
+              try {
+                reader.releaseLock()
+              } catch {}
+              reader = undefined
+
+              if (controller.signal.aborted) throw streamError
+
+              // Never retry after visible content was emitted (including timeout mid-stream).
+              const canRetry = output.content.length === 0 && attempt < maxRetries
+              if (canRetry) {
+                output.content.length = 0
+                textBlock = undefined
+                currentTextIdx = -1
+                thinkingIdx = -1
+                output.stopReason = "stop"
+                output.errorMessage = undefined
+                finished = false
+                const waitMs = attemptTimedOut ? 0 : retryDelayMs(attempt, null, maxRetryDelayMs)
+                if (waitMs > 0) await delay(waitMs, controller.signal)
+                continue retryLoop
+              }
+              if (attemptTimedOut) throw timeoutError(timeoutMs)
+              throw streamError
+            }
+
+            // Stream completed successfully.
+            endTextBlock()
+            endThinking()
+
+            stream.push({
+              type: "done",
+              reason: successStopReason(output.stopReason),
+              message: output,
+            })
+            stream.end()
+            break retryLoop
+          } finally {
+            controller.signal.removeEventListener("abort", onOuterAbort)
+            clearAttemptTimeout()
           }
         }
-
-        endTextBlock()
-        endThinking()
-
-        stream.push({
-          type: "done",
-          reason: successStopReason(output.stopReason),
-          message: output,
-        })
-        stream.end()
       } catch (error: unknown) {
         const reason: ErrorReason = controller.signal.aborted ? "aborted" : "error"
         output.stopReason = reason
