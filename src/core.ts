@@ -443,6 +443,13 @@ export function createStreamCommandCode(deps: CoreDependencies) {
             max_tokens: generateMaxTokens(model, options),
             temperature: 0.3,
             stream: true,
+            ...((options as any)?.reasoning && (model as any).reasoning
+              ? {
+                  reasoning_effort:
+                    (model as any).thinkingLevelMap?.[(options as any).reasoning] ??
+                    (options as any).reasoning,
+                }
+              : {}),
           },
           threadId,
         }
