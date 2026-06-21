@@ -7,6 +7,9 @@ export const DEFAULT_MODELS_URL = "https://api.commandcode.ai/provider/v1/models
 /** Default TTL for cached model list: 6 hours. */
 export const DEFAULT_MODELS_CACHE_TTL_MS = 6 * 60 * 60 * 1000
 
+/** When stale cache exists, max time to wait for a fresh network response before falling back. */
+const STALE_CACHE_FETCH_TIMEOUT_MS = 2_000
+
 const DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 
 interface ApiModel {
@@ -43,7 +46,7 @@ interface FetchCommandCodeModelsOptions {
 // ---------------------------------------------------------------------------
 
 function defaultCacheDir(): string {
-  return join(homedir(), ".pi", "agent", "cache")
+  return process.env.COMMANDCODE_MODELS_CACHE_DIR ?? join(homedir(), ".pi", "agent", "cache")
 }
 
 function cacheFilePath(cacheDir: string): string {
@@ -76,15 +79,13 @@ function writeCacheFile(path: string, models: CommandCodeModel[]): void {
  * Semantic comparison: ignore API noise like `created` timestamp,
  * only compare fields that affect pi's model registration.
  */
-function hasModelsChanged(
-  cached: ModelsCache,
-  fresh: CommandCodeModel[],
-): boolean {
+function hasModelsChanged(cached: ModelsCache, fresh: CommandCodeModel[]): boolean {
   if (cached.models.length !== fresh.length) return true
-  return !cached.models.every((c, i) =>
-    c.id === fresh[i].id &&
-    c.contextWindow === fresh[i].contextWindow &&
-    c.maxTokens === fresh[i].maxTokens,
+  return !cached.models.every(
+    (c, i) =>
+      c.id === fresh[i].id &&
+      c.contextWindow === fresh[i].contextWindow &&
+      c.maxTokens === fresh[i].maxTokens,
   )
 }
 
@@ -136,9 +137,11 @@ export function commandCodeModelsFromApiResponse(value: unknown): readonly Comma
 export async function fetchCommandCodeModelsRaw(
   url: string,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<CommandCodeModel[]> {
   const response = await fetchImpl(url, {
     headers: { accept: "application/json" },
+    signal,
   })
 
   if (!response.ok) {
@@ -154,13 +157,15 @@ export async function fetchCommandCodeModelsRaw(
 /**
  * Fetch models with file-based TTL cache.
  *
- * Cache lives at `cacheDir/commandcode-models.json`, defaulting to
- * `~/.pi/agent/cache/`. On cache hit within TTL, returns instantly (~0.02ms)
- * without any network request. On cache miss or expiry, fetches from
- * the Provider API and writes the result to cache.
+ * Priority:
+ *  1. Fresh cache (within TTL) → return instantly, no network.
+ *  2. Stale cache exists → try fetch with short (2s) timeout.
+ *     If fetch completes in time → return fresh + update cache.
+ *     If fetch times out / fails → return stale cache silently.
+ *  3. No cache at all → block on network (first startup).
  *
- * When the network is unreachable and stale cache exists, silently
- * returns stale data as a degradation strategy.
+ * Cache lives at `cacheDir/commandcode-models.json`, defaulting to
+ * `~/.pi/agent/cache/`.
  */
 export async function fetchCommandCodeModels(
   options: FetchCommandCodeModelsOptions = {},
@@ -169,37 +174,43 @@ export async function fetchCommandCodeModels(
   const fetchImpl = options.fetchImpl ?? fetch
   const ttlMs = options.ttlMs ?? DEFAULT_MODELS_CACHE_TTL_MS
   const cacheDir = options.cacheDir ?? defaultCacheDir()
+  const cachePath = cacheFilePath(cacheDir)
 
-  // --- Cache hit: return fresh cached data without network ---
+  // 1) Fresh cache: return instantly, no network
   if (ttlMs > 0) {
-    const cachePath = cacheFilePath(cacheDir)
     const cached = readCacheFile(cachePath)
     if (cached && Date.now() - cached.cachedAt < ttlMs) {
       return cached.models
     }
   }
 
-  // --- Cache miss or expired: fetch from network ---
-  try {
-    const models = await fetchCommandCodeModelsRaw(url, fetchImpl)
-
-    if (ttlMs > 0) {
-      const cachePath = cacheFilePath(cacheDir)
-      const cached = readCacheFile(cachePath)
-      // 只在内容发生变化时才写盘，避免不必要 IO
-      if (!cached || hasModelsChanged(cached, models)) {
-        writeCacheFile(cachePath, models)
+  // 2) Stale cache exists: try network with short timeout
+  if (ttlMs > 0) {
+    const stale = readCacheFile(cachePath)
+    if (stale) {
+      try {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), STALE_CACHE_FETCH_TIMEOUT_MS)
+        try {
+          const models = await fetchCommandCodeModelsRaw(url, fetchImpl, controller.signal)
+          if (hasModelsChanged(stale, models)) {
+            writeCacheFile(cachePath, models)
+          }
+          return models
+        } finally {
+          clearTimeout(timer)
+        }
+      } catch {
+        // Network timed out or failed → return stale cache silently
+        return stale.models
       }
     }
-
-    return models
-  } catch (err) {
-    // --- Network failure with stale cache: degrade silently ---
-    if (ttlMs > 0) {
-      const cachePath = cacheFilePath(cacheDir)
-      const cached = readCacheFile(cachePath)
-      if (cached) return cached.models
-    }
-    throw err
   }
+
+  // 3) No cache at all: must fetch (typically first startup)
+  const models = await fetchCommandCodeModelsRaw(url, fetchImpl)
+  if (ttlMs > 0) {
+    writeCacheFile(cachePath, models)
+  }
+  return models
 }

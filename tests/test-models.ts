@@ -118,9 +118,7 @@ function makeMockResponse(init: {
   } as unknown as Response
 }
 
-function makeFetch(
-  responseBody: unknown,
-): { fetchImpl: typeof fetch; callCount: () => number } {
+function makeFetch(responseBody: unknown): { fetchImpl: typeof fetch; callCount: () => number } {
   let count = 0
   return {
     fetchImpl: async () => {
@@ -185,7 +183,7 @@ describe("fetchCommandCodeModels() with cache", () => {
     assert.deepEqual(models, [A_MODEL])
   })
 
-  it("scenario 3: expired cache + network OK → fetches, updates cache", async () => {
+  it("scenario 3: expired cache + network OK → fetches within timeout, returns fresh, updates cache", async () => {
     const cacheDir = mkdtempSync(join(tmpdir(), "cc-models-test-"))
     writeCacheFile(cacheDir, [A_MODEL], Date.now() - 60_000)
 
@@ -198,7 +196,7 @@ describe("fetchCommandCodeModels() with cache", () => {
     })
 
     assert.equal(callCount(), 1, "should have called fetch")
-    // 返回新数据
+    // 短超时内 mock 返回了 → 返回新数据
     assert.deepEqual(models, [B_MODEL])
   })
 

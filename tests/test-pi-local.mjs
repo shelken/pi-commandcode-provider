@@ -150,6 +150,9 @@ const env = {
 
 if (hasLivePiAuth()) {
   console.log("[pi-local] using live pi auth")
+  // Use isolated cache dir so test doesn't hit a fresh real cache
+  const cacheDir = mkdtempSync(join(tmpdir(), "pi-cc-cache-"))
+  env.COMMANDCODE_MODELS_CACHE_DIR = cacheDir
 } else {
   console.log("[pi-local] live pi auth not found; using mock auth fallback")
   tempHome = mkdtempSync(join(tmpdir(), "pi-cc-home-"))
@@ -348,4 +351,7 @@ try {
 } finally {
   await new Promise((resolve) => server.close(resolve))
   if (tempHome) rmSync(tempHome, { recursive: true, force: true })
+  if (env.COMMANDCODE_MODELS_CACHE_DIR) {
+    rmSync(env.COMMANDCODE_MODELS_CACHE_DIR, { recursive: true, force: true })
+  }
 }
