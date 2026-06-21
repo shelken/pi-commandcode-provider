@@ -36,6 +36,43 @@ const ZERO_MODEL_COST: CommandCodeModelCost = {
   cacheWrite: 0,
 }
 
+// 官方 CLI 各模型支持的 reasoningEfforts（来源: command-code v0.39.1 源码）
+// 用于生成 thinkingLevelMap，让 pi 显示正确的可选思考级别
+const MODEL_REASONING_EFFORTS: Record<string, string[]> = {
+  "claude-sonnet-4-6":          ["low", "medium", "high", "xhigh", "max"],
+  "claude-fable-5":             ["low", "medium", "high", "xhigh", "max"],
+  "claude-opus-4-8":            ["low", "medium", "high", "xhigh", "max"],
+  "claude-opus-4-7":            ["low", "medium", "high", "xhigh", "max"],
+  "gpt-5.4":                    ["low", "medium", "high", "xhigh"],
+  "gpt-5.3-codex":              ["low", "medium", "high", "xhigh"],
+  "gpt-5.4-mini":               ["low", "medium", "high"],
+  "deepseek/deepseek-v4-pro":   ["high", "max"],
+  "deepseek/deepseek-v4-flash": ["high", "max"],
+  "google/gemini-3.5-flash":    ["low", "medium", "high"],
+  "google/gemini-3.1-flash-lite": ["low", "medium", "high"],
+}
+
+function buildThinkingLevelMap(efforts: string[]): Record<string, string | null> | undefined {
+  const set = new Set(efforts)
+  const hasXhigh = set.has("xhigh")
+  const hasMax = set.has("max")
+  const map: Record<string, string | null> = {}
+
+  for (const level of ["minimal", "low", "medium", "high"] as const) {
+    map[level] = set.has(level) ? level : null
+  }
+
+  if (hasXhigh) {
+    map.xhigh = "xhigh"
+  } else if (hasMax) {
+    map.xhigh = "max"
+  } else {
+    map.xhigh = null
+  }
+
+  return map
+}
+
 // The Provider API supplies the current model list. Keep known display pricing
 // here until the Provider API exposes prices directly.
 const MODEL_COSTS: Record<string, CommandCodeModelCost> = {
@@ -108,21 +145,10 @@ export default async function (pi: ExtensionAPI) {
         maxTokens: model.maxTokens,
       }
 
-      // 只给 DeepSeek 模型添加 thinkingLevelMap
-      if (model.id.startsWith("deepseek/")) {
-        return {
-          ...baseModel,
-          thinkingLevelMap: {
-            minimal: null,
-            low: null,
-            medium: null,
-            high: "high",
-            xhigh: "max",
-          },
-        }
-      }
+      const efforts = MODEL_REASONING_EFFORTS[model.id]
+      const thinkingLevelMap = efforts ? buildThinkingLevelMap(efforts) : undefined
 
-      return baseModel
+      return thinkingLevelMap ? { ...baseModel, thinkingLevelMap } : baseModel
     }),
   })
 }
