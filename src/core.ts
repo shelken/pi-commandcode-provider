@@ -385,15 +385,17 @@ export function createStreamCommandCode(deps: CoreDependencies) {
             const usage = commandCodeUsage(event)
             if (usage) {
               const details = commandCodeInputTokenDetails(usage)
-              output.usage.input = numberValue(usage.inputTokens) ?? 0
+              const cachedTokens = numberValue(details?.cacheReadTokens) ?? 0
+
+              // API 的 inputTokens 含 cache tokens, 减去得到非缓存输入
+              // (对齐 pi OpenAI provider 的惯例)
+              output.usage.input = (numberValue(usage.inputTokens) ?? 0) - cachedTokens
               output.usage.output = numberValue(usage.outputTokens) ?? 0
-              output.usage.cacheRead = numberValue(details?.cacheReadTokens) ?? 0
+              output.usage.cacheRead = cachedTokens
               output.usage.cacheWrite = numberValue(details?.cacheWriteTokens) ?? 0
-              output.usage.totalTokens =
-                output.usage.input +
-                output.usage.output +
-                output.usage.cacheRead +
-                output.usage.cacheWrite
+              // API 已返回 totalTokens, 直接用
+              output.usage.totalTokens = numberValue(usage.totalTokens) ??
+                output.usage.input + output.usage.output + cachedTokens + output.usage.cacheWrite
               deps.calculateCost(model, output.usage)
             }
             output.stopReason = mapFinishReason(event.finishReason)
