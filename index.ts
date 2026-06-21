@@ -36,8 +36,10 @@ const ZERO_MODEL_COST: CommandCodeModelCost = {
   cacheWrite: 0,
 }
 
-// 官方 CLI 各模型支持的 reasoningEfforts（来源: command-code v0.39.1 源码）
-// 用于生成 thinkingLevelMap，让 pi 显示正确的可选思考级别
+// 官方 CLI 各模型支持的 reasoningEfforts
+// 来源: npm pack command-code@0.39.1 → dist/index.mjs
+// 提取方式: grep -oP '\w+:\{[^}]+reasoningEfforts:\[[^\]]+\]'
+// 用于生成 thinkingLevelMap，让 pi UI 只显示 API 实际支持的级别
 const MODEL_REASONING_EFFORTS: Record<string, string[]> = {
   "claude-sonnet-4-6":          ["low", "medium", "high", "xhigh", "max"],
   "claude-fable-5":             ["low", "medium", "high", "xhigh", "max"],
@@ -52,6 +54,12 @@ const MODEL_REASONING_EFFORTS: Record<string, string[]> = {
   "google/gemini-3.1-flash-lite": ["low", "medium", "high"],
 }
 
+// 把 CLI 的 reasoningEfforts 转成 pi 的 thinkingLevelMap
+// pi 的 getSupportedThinkingLevels():
+//   mapped === null → 不显示
+//   level === "xhigh" && mapped === undefined → 不显示
+//   否则 → 显示（minimal/low/medium/high 默认全显示，需显式 null 隐藏）
+// 源码: @earendil-works/pi-ai/dist/models.js:31
 function buildThinkingLevelMap(efforts: string[]): Record<string, string | null> | undefined {
   const set = new Set(efforts)
   const hasXhigh = set.has("xhigh")

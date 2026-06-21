@@ -443,6 +443,9 @@ export function createStreamCommandCode(deps: CoreDependencies) {
             max_tokens: generateMaxTokens(model, options),
             temperature: 0.3,
             stream: true,
+            // pi 通过 options.reasoning 传来思考级别
+            // 经 thinkingLevelMap 转换后以 reasoning_effort 发给 API
+            // 参考官方 CLI: dist/index.mjs → setReasoningEffort()
             ...((options as any)?.reasoning && (model as any).reasoning
               ? {
                   reasoning_effort:
